@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
+
 import * as React from 'react';
 import {
   BuildRestClient,
@@ -140,7 +140,6 @@ export class App extends React.Component<AppProps, AppState> {
     };
     type ReportType = keyof typeof reportTypes;
 
-    // get all supported report attachments for the build once
     const additionalAttachments: Attachment[] = [];
     for (const key of Object.keys(reportTypes)) {
       const reportAttachments = await this.buildClient.getAttachments(
@@ -153,61 +152,89 @@ export class App extends React.Component<AppProps, AppState> {
 
     jsonAttachments.forEach(
       async function (attachment: Attachment) {
-        // get the record id from attachment url
+
         const jsonAttachementUrl = attachment._links.self.href;
-        // handle legacy url https://{organization}.visualstudio.com
-        const recordId = jsonAttachementUrl.includes('dev.azure.com')
-          ? jsonAttachementUrl.split('/')[10]
-          : jsonAttachementUrl.split('/')[9];
-        // get the record from the timeline
-        const record = records.find((record) => record.id === recordId);
+        const recordIdMatch = jsonAttachementUrl.match(/\/records\/([^/]+)/);
+        const recordId = recordIdMatch ? recordIdMatch[1] : '';
+
+        let record = records.find((r) => r.id === recordId);
+
         if (!record) {
-          console.log(`Record not found for attachment: ${attachment.name}`);
+          record = timeline.records.find((r) => r.id === recordId);
+        }
+        let buffer: ArrayBuffer | undefined;
+        if (record) {
+          try {
+            buffer = await this.buildClient.getAttachment(
+              this.project.id,
+              build.id,
+              timeline.id,
+              record.id,
+              'JSON_RESULT',
+              attachment.name
+            );
+          } catch (e) {
+            console.log('getAttachment failed, will try direct fetch', e);
+          }
+        }
+
+
+        if (!buffer) {
+          try {
+            const response = await fetch(attachment._links.self.href, {
+              credentials: 'include',
+              headers: { Accept: 'application/json' },
+            });
+            buffer = await response.arrayBuffer();
+          } catch (e) {
+            console.log('Direct fetch failed for attachment', e);
+          }
+        }
+
+        if (!buffer) {
+          console.log(`Unable to retrieve attachment: ${attachment.name}`);
           return;
         }
+
+
+        if (!record) {
+          record = { id: 'build', name: 'Trivy', type: 'Task' } as any;
+        }
+
         try {
-          const buffer = await this.buildClient.getAttachment(
-            this.project.id,
-            build.id,
-            timeline.id,
-            record.id,
-            'JSON_RESULT',
-            attachment.name
-          );
           const report = this.decodeReport(buffer) as Report;
           if (!report.DownloadReports) {
             report.DownloadReports = [];
           }
 
-          if (record.name) {
+          if (record && record.name) {
             report.DisplayName = record.name;
           }
-          // Add json report to the report downloads by default
+
           report.DownloadReports.push({
             Name: 'JSON',
             Url: attachment._links.self.href,
           });
 
-          // check if there are any other attachments with the same record id
-          // and add them to the downloads
+
           additionalAttachments
             .filter((reportAttachment) =>
               reportAttachment._links.self.href.includes(recordId)
             )
             .forEach((reportAttachment) => {
-              // get the report type from attachment url
+
               const attachmentUrl = reportAttachment._links.self.href;
-              console.log(
-                `Found ${attachmentUrl} for report ${report.DisplayName}`
-              );
-              // handle legacy url https://{organization}.visualstudio.com
-              const attachmentType = attachmentUrl.includes('dev.azure.com')
-                ? attachmentUrl.split('/')[12]
-                : attachmentUrl.split('/')[11];
-              report.DownloadReports.push({
-                Name: reportTypes[attachmentType as ReportType],
-                Url: attachmentUrl,
-              });
+              console.log(`Found ${attachmentUrl} for report ${report.DisplayName}`);
+
+              const attachmentTypeMatch = attachmentUrl.match(/\/attachments\/([^/]+)/);
+              const attachmentType = attachmentTypeMatch ? attachmentTypeMatch[1] : '';
+
+              if (attachmentType && reportTypes[attachmentType as ReportType]) {
+                report.DownloadReports.push({
+                  Name: reportTypes[attachmentType as ReportType],
+                  Url: attachmentUrl,
+                });
+              }
             });
 
           this.setState((prevState: any) => ({
